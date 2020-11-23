@@ -1,0 +1,302 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  "A basic template for creating a Lambda-backed API Gateway for use as a custom identity
+  provider in AWS Transfer. It authenticates against an entry in AWS Secrets Manager
+  of the format server-id/username."
+Resources:
+  UsersResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref 'CustomIdentityProviderApi'
+      PathPart: users
+      ParentId: !Ref 'ServerIdResource'
+  ApiStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      DeploymentId: !Ref 'ApiDeployment202008'
+      RestApiId: !Ref 'CustomIdentityProviderApi'
+      MethodSettings:
+        - HttpMethod: '*'
+          ResourcePath: /*
+          DataTraceEnabled: false
+          LoggingLevel: INFO
+      StageName: prod
+  GetUserConfigRequest:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref 'CustomIdentityProviderApi'
+      MethodResponses:
+        - ResponseModels:
+            application/json: UserConfigResponseModel
+          StatusCode: '200'
+      RequestParameters:
+        method.request.header.Password: false
+      ResourceId: !Ref 'GetUserConfigResource'
+      AuthorizationType: AWS_IAM
+      Integration:
+        IntegrationHttpMethod: POST
+        RequestTemplates:
+          application/json: "{\n  \"username\": \"$util.urlDecode($input.params('username'))\"\
+            ,\n  \"password\": \"$util.escapeJavaScript($input.params('Password')).replaceAll(\"\
+            \\\\'\",\"'\")\",\n  \"protocol\": \"$input.params('protocol')\",\n  \"\
+            serverId\": \"$input.params('serverId')\",\n  \"sourceIp\": \"$input.params('sourceIp')\"\
+            \n}\n"
+        IntegrationResponses:
+          - StatusCode: '200'
+        Type: AWS
+        Uri: !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${GetUserConfigLambda.Arn}/invocations
+      HttpMethod: GET
+    DependsOn: GetUserConfigResponseModel
+  CustomIdentityProviderApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      FailOnWarnings: true
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+      Description: API used for Transfer Family to access user information in Secrets
+        Manager
+      Name: Transfer Family Secrets Manager Integration API
+  ApiLoggingAccount:
+    Type: AWS::ApiGateway::Account
+    Properties:
+      CloudWatchRoleArn: !GetAtt 'ApiCloudWatchLogsRole.Arn'
+    DependsOn:
+      - CustomIdentityProviderApi
+  GetUserConfigLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:invokeFunction
+      FunctionName: !GetAtt 'GetUserConfigLambda.Arn'
+      SourceArn: !Sub 'arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${CustomIdentityProviderApi}/*'
+      Principal: apigateway.amazonaws.com
+  ServersResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref 'CustomIdentityProviderApi'
+      PathPart: servers
+      ParentId: !GetAtt 'CustomIdentityProviderApi.RootResourceId'
+  ApiDeployment202008:
+    Type: AWS::ApiGateway::Deployment
+    Properties:
+      RestApiId: !Ref 'CustomIdentityProviderApi'
+    DependsOn:
+      - GetUserConfigRequest
+  ApiCloudWatchLogsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Policies:
+        - PolicyName: ApiGatewayLogsPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:DescribeLogGroups
+                  - logs:DescribeLogStreams
+                  - logs:PutLogEvents
+                  - logs:GetLogEvents
+                  - logs:FilterLogEvents
+                Resource: '*'
+                Effect: Allow
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - apigateway.amazonaws.com
+  GetUserConfigLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code: index.py
+      Description: A function to lookup and return user data from AWS Secrets Manager.
+      Tags:
+        - Value: SAM
+          Key: lambda:createdBy
+      Environment:
+        Variables: 
+          SecretsManagerRegion: !Ref 'AWS::Region'
+      Handler: index.lambda_handler
+      Role: !GetAtt 'LambdaExecutionRole.Arn'
+      Runtime: python3.7
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+  LambdaExecutionRolePolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: LambdaSecretsPolicy
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Action:
+              - secretsmanager:GetSecretValue
+            Resource: !Sub arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${TransferServer.ServerId}/* ##make this it's own policy
+            Effect: Allow
+      Roles:
+      - !Ref LambdaExecutionRole
+  TransferCWLoggingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSTransferLoggingAccess'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - transfer.amazonaws.com
+  TransferIdentityProviderRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Policies:
+        - PolicyName: TransferCanInvokeThisApi
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Action:
+                  - execute-api:Invoke
+                Resource: !Sub 'arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${CustomIdentityProviderApi}/prod/GET/*'
+                Effect: Allow
+        - PolicyName: TransferCanReadThisApi
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Action:
+                  - apigateway:GET
+                Resource: '*'
+                Effect: Allow
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: transfer.amazonaws.com
+  UserNameResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref 'CustomIdentityProviderApi'
+      PathPart: '{username}'
+      ParentId: !Ref 'UsersResource'
+  ServerIdResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref 'CustomIdentityProviderApi'
+      PathPart: '{serverId}'
+      ParentId: !Ref 'ServersResource'
+  GetUserConfigResponseModel:
+    Type: AWS::ApiGateway::Model
+    Properties:
+      ContentType: application/json
+      Schema:
+        $schema: http://json-schema.org/draft-04/schema#
+        type: object
+        properties:
+          Policy:
+            type: string
+          PublicKeys:
+            items:
+              type: string
+            type: array
+          Role:
+            type: string
+          HomeDirectory:
+            type: string
+        title: UserUserConfig
+      RestApiId: !Ref 'CustomIdentityProviderApi'
+      Name: UserConfigResponseModel
+      Description: API response for GetUserConfig
+  GetUserConfigResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref 'CustomIdentityProviderApi'
+      PathPart: config
+      ParentId: !Ref 'UserNameResource'
+  TransferServer:
+    Type: AWS::Transfer::Server
+    Properties:
+      Protocols:
+      - SFTP
+      IdentityProviderType: API_GATEWAY
+      IdentityProviderDetails:
+        Url: !Sub https://${CustomIdentityProviderApi}.execute-api.${AWS::Region}.amazonaws.com/${ApiStage}
+        InvocationRole: !GetAtt 'TransferIdentityProviderRole.Arn'
+      LoggingRole: !GetAtt 'TransferCWLoggingRole.Arn'
+
+
+  SftpUserRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Policies:
+        - PolicyName: userole
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Action:
+                  - s3:ListBucket
+                Resource: !Sub 'arn:aws:s3:::${Bucket}'
+                Effect: Allow
+              - Action:
+                  - "s3:PutObject"
+                  - "s3:GetObject"
+                  - "s3:DeleteObject"
+                  - "s3:GetObjectVersion"
+                Resource: 
+                - !Sub 'arn:aws:s3:::${Bucket}/home/*'
+                Effect: Allow
+
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: transfer.amazonaws.com
+
+  Bucket:
+    Type: "AWS::S3::Bucket"
+
+#Export the following to Parameter store so they can be used from other CF stacks. Eg, "Create user" CF stacks
+
+  BucketParameter:
+    Type: AWS::SSM::Parameter
+    Properties: 
+      Name: !Sub ${AWS::StackName}-Bucket
+      Type: String
+      Value: !Ref Bucket
+
+  TransferServerParameter:
+    Type: AWS::SSM::Parameter
+    Properties: 
+      Name: !Sub ${AWS::StackName}-TransferServer
+      Type: String
+      Value: !Sub ${TransferServer.ServerId}
+
+  SftpUserRoleParameter:
+    Type: AWS::SSM::Parameter
+    Properties: 
+      Name: !Sub ${AWS::StackName}-SftpUserRole
+      Type: String
+      Value: !Ref SftpUserRole

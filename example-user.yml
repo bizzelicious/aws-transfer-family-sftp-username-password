@@ -1,0 +1,40 @@
+---
+#########################################################################################################################################################################################################################################################
+#                                                                                                                                                                                                                                                       #
+# READ THIS!                                                                                                                                                                                                                                            #
+#                                                                                                                                                                                                                                                       #
+# This template creates secrets that will be embedded and used by the WireGuard instances. In production, make sure you follow the "Do not embed credentials in your templates best practice" and your organizations preffered way of handling secrets! #
+#                                                                                                                                                                                                                                                       #
+# https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/security-best-practices.html#creds                                                                                                                                                     #
+#                                                                                                                                                                                                                                                       #
+#########################################################################################################################################################################################################################################################
+
+
+Description: 'CloudForamtion stack creating WireGuard keys. In production, make sure you follow the "Do not embed credentials in your templates best practice" and your organizations preffered way of handling secrets! https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/security-best-practices.html#creds'
+AWSTemplateFormatVersion: '2010-09-09'
+Parameters:
+  UserPassword:
+    Type: String
+    Description: 'User SFTP password'
+    NoEcho: true
+  UserName:
+    Type: String
+    Description: 'User SFTP username'
+    Default: 'exampleuser'
+  BucketParameter:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: <ftp-stack-name>-Bucket
+  SftpUserRoleParameter:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: <ftp-stack-name>-SftpUserRole
+  TransferServerParameter:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: <ftp-stack-name>-TransferServer
+
+Resources:
+  SftpUser:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub ${TransferServerParameter}/${UserName}
+      Description: Example user for the SFTP server
+      SecretString: !Sub '{"Role": "arn:aws:iam::${AWS::AccountId}:role/${SftpUserRoleParameter}","Password": "${UserPassword}","HomeDirectoryDetails": "[{\"Entry\": \"/\", \"Target\": \"/${BucketParameter}/home/${UserName}\"}]"}'
